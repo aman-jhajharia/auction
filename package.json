@@ -1,0 +1,23 @@
+{
+  "name": "muqabla-basketball-auction",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Production-ready real-time Basketball Player Auction Web Application for Muqabla",
+  "scripts": {
+    "dev:server": "npm run dev --prefix server",
+    "dev:client": "npm run dev --prefix client",
+    "dev": "concurrently -n \"SERVER,CLIENT\" -c \"blue,green\" \"npm run dev:server\" \"npm run dev:client\"",
+    "build:server": "npm run build --prefix server",
+    "build:client": "npm run build --prefix client",
+    "build": "npm run build:client && npm run build:server",
+    "start": "node server/dist/index.js",
+    "test": "npm run test --prefix server",
+    "seed:prod": "npm run seed:prod --prefix server",
+    "accounts:init": "npm run accounts:init --prefix server",
+    "reset:password": "npm run reset:password --prefix server --",
+    "db:backup": "npm run db:backup --prefix server"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2"
+  }
+}

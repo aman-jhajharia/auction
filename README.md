@@ -13,17 +13,17 @@ The server is currently running locally on:
 
 ### Pre-Configured Credentials
 
-The portal features a **⚡ 1-Click Quick Login Switcher** on the login screen for testing, or you can use the manual credentials below:
+Accounts and secure initial credentials are generated via `npm run accounts:init` (passwords stored strictly as bcrypt hashes):
 
-| Role | Username | Password | Notes |
-| :--- | :--- | :--- | :--- |
-| **Admin** | `admin` | `admin123` | Full control room, 5-team squad overview, audit logs, timer management |
-| **Public Display** | `display` | `display123` | 16:9 Projector presentation mode (strictly NO private budgets or bidder identities) |
-| **Team A Captain** | `captain_a` | `captain123` | Phoenix (Captain: Aman Sharma, Retained: Rahul Sharma) |
-| **Team B Captain** | `captain_b` | `captain123` | Spartans (Captain: Priya Patel, Retained: Sneha Reddy) |
-| **Team C Captain** | `captain_c` | `captain123` | Thunder (Captain: Rohan Verma, Retained: Arjun Singh) |
-| **Team D Captain** | `captain_d` | `captain123` | Gladiators (Captain: Ananya Iyer, Retained: Rohit Nair) |
-| **Team E Captain** | `captain_e` | `captain123` | Vipers (Captain: Vikram Malhotra, Retained: Ritu Sen) |
+| Role | Username | Team Name | Captain Name | Retained Player |
+| :--- | :--- | :--- | :--- | :--- |
+| **Admin** | `admin` | Platform Admin | Administrator | — |
+| **Public Display** | `display` | Screen / Projector | Display Mode | — |
+| **Team A Captain** | `ashmit_curry` | Team Ashmit | Ashmit | Rahul Sharma |
+| **Team B Captain** | `vansh_baby` | Team Vansh | Vansh | Sneha Reddy |
+| **Team C Captain** | `divyanshu_lebron` | Team Divyanshu | Divyanshu | Arjun Singh |
+| **Team D Captain** | `champ_chirayu` | Team Chirayu | Chirayu | Rohit Nair |
+| **Team E Captain** | `parth_gangsta` | Team Parth | Parth | Ritu Sen |
 
 ---
 

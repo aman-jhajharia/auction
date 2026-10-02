@@ -10,7 +10,6 @@ import {
   TeamSquadSummary,
 } from './types.js';
 import {
-  calculateMaxLegalBid,
   calculateSquadSummary,
   DEFAULT_CONFIG,
   validateBidAttempt,
@@ -27,54 +26,65 @@ export class AuctionEngine {
     this.io = io;
   }
 
-  public getState(): AuctionStateRecord {
-    const row = db.prepare('SELECT * FROM auction_state WHERE id = 1').get() as AuctionStateRecord;
-    return row;
-  }
-
-  public getConfig(): AuctionConfig {
-    const state = this.getState();
+  public parseConfig(configJson: any): AuctionConfig {
+    if (!configJson) return DEFAULT_CONFIG;
+    if (typeof configJson === 'object') return { ...DEFAULT_CONFIG, ...configJson };
     try {
-      return JSON.parse(state.config_json);
+      return { ...DEFAULT_CONFIG, ...JSON.parse(configJson) };
     } catch {
       return DEFAULT_CONFIG;
     }
   }
 
-  public updateConfig(newConfig: Partial<AuctionConfig>, actor: string) {
-    const current = this.getConfig();
+  public async getState(): Promise<AuctionStateRecord> {
+    const row = await db.queryOne<AuctionStateRecord>('SELECT * FROM auction_state WHERE id = 1');
+    if (!row) {
+      throw new Error('Auction state record not initialized.');
+    }
+    return row;
+  }
+
+  public async getConfig(): Promise<AuctionConfig> {
+    const state = await this.getState();
+    return this.parseConfig(state.config_json);
+  }
+
+  public async updateConfig(newConfig: Partial<AuctionConfig>, actor: string): Promise<void> {
+    const current = await this.getConfig();
     if (current.config_locked) {
       throw new Error('Auction configuration is locked and cannot be changed.');
     }
     const updated = { ...current, ...newConfig };
-    db.prepare('UPDATE auction_state SET config_json = ? WHERE id = 1').run(JSON.stringify(updated));
-    this.logAudit('CONFIG_UPDATED', actor, null, null, { newConfig: updated });
-    this.broadcastState();
+    const jsonStr = JSON.stringify(updated);
+    await db.execute('UPDATE auction_state SET config_json = ? WHERE id = 1', [jsonStr]);
+    await this.logAudit('CONFIG_UPDATED', actor, null, null, { newConfig: updated });
+    await this.broadcastState();
   }
 
-  public lockConfig(actor: string) {
-    const config = this.getConfig();
+  public async lockConfig(actor: string): Promise<void> {
+    const config = await this.getConfig();
     config.config_locked = true;
-    db.prepare('UPDATE auction_state SET config_json = ?, status = ? WHERE id = 1').run(
-      JSON.stringify(config),
-      'READY'
-    );
-    this.logAudit('CONFIG_LOCKED', actor, null, null, { config });
-    this.broadcastState();
+    const jsonStr = JSON.stringify(config);
+    await db.execute('UPDATE auction_state SET config_json = ?, status = ? WHERE id = 1', [
+      jsonStr,
+      'READY',
+    ]);
+    await this.logAudit('CONFIG_LOCKED', actor, null, null, { config });
+    await this.broadcastState();
   }
 
-  public startAuction(actor: string) {
-    const state = this.getState();
+  public async startAuction(actor: string): Promise<void> {
+    const state = await this.getState();
     if (state.status === 'SETUP') {
-      this.lockConfig(actor);
+      await this.lockConfig(actor);
     }
-    db.prepare('UPDATE auction_state SET status = ? WHERE id = 1').run('READY');
-    this.logAudit('AUCTION_STARTED', actor, null, null, {});
-    this.broadcastState();
+    await db.execute('UPDATE auction_state SET status = ? WHERE id = 1', ['READY']);
+    await this.logAudit('AUCTION_STARTED', actor, null, null, {});
+    await this.broadcastState();
   }
 
-  public pauseAuction(actor: string) {
-    const state = this.getState();
+  public async pauseAuction(actor: string): Promise<void> {
+    const state = await this.getState();
     if (state.status !== 'BIDDING') return;
 
     if (this.timerInterval) {
@@ -82,98 +92,101 @@ export class AuctionEngine {
       this.timerInterval = null;
     }
 
-    db.prepare('UPDATE auction_state SET status = ?, timer_paused = 1 WHERE id = 1').run('PAUSED');
-    this.logAudit('AUCTION_PAUSED', actor, state.current_player_id, null, {
+    await db.execute('UPDATE auction_state SET status = ?, timer_paused = 1 WHERE id = 1', ['PAUSED']);
+    await this.logAudit('AUCTION_PAUSED', actor, state.current_player_id, null, {
       remaining: state.timer_remaining,
     });
-    this.broadcastState();
+    await this.broadcastState();
   }
 
-  public resumeAuction(actor: string) {
-    const state = this.getState();
+  public async resumeAuction(actor: string): Promise<void> {
+    const state = await this.getState();
     if (state.status !== 'PAUSED') return;
 
-    db.prepare('UPDATE auction_state SET status = ?, timer_paused = 0 WHERE id = 1').run('BIDDING');
-    this.logAudit('AUCTION_RESUMED', actor, state.current_player_id, null, {
+    await db.execute('UPDATE auction_state SET status = ?, timer_paused = 0 WHERE id = 1', ['BIDDING']);
+    await this.logAudit('AUCTION_RESUMED', actor, state.current_player_id, null, {
       remaining: state.timer_remaining,
     });
     this.startTimerCountdown();
-    this.broadcastState();
+    await this.broadcastState();
   }
 
-  public extendTimer(seconds: number, actor: string) {
-    const state = this.getState();
+  public async extendTimer(seconds: number, actor: string): Promise<void> {
+    const state = await this.getState();
     if (state.status !== 'BIDDING' && state.status !== 'PAUSED') return;
 
     const newTimer = state.timer_remaining + seconds;
-    db.prepare('UPDATE auction_state SET timer_remaining = ? WHERE id = 1').run(newTimer);
-    this.logAudit('TIMER_EXTENDED', actor, state.current_player_id, null, {
+    await db.execute('UPDATE auction_state SET timer_remaining = ? WHERE id = 1', [newTimer]);
+    await this.logAudit('TIMER_EXTENDED', actor, state.current_player_id, null, {
       addedSeconds: seconds,
       newTimer,
     });
     this.broadcastTimer(newTimer);
-    this.broadcastState();
+    await this.broadcastState();
   }
 
-  public revealPlayer(playerId: string, actor: string) {
+  public async revealPlayer(playerId: string, actor: string): Promise<void> {
     this.stopTimer();
 
-    const player = db.prepare('SELECT * FROM players WHERE id = ?').get(playerId) as Player | undefined;
+    const player = await db.queryOne<Player>('SELECT * FROM players WHERE id = ?', [playerId]);
     if (!player) throw new Error('Player not found.');
     if (player.status !== 'AVAILABLE' && player.status !== 'UNSOLD') {
       throw new Error(`Cannot auction player with status: ${player.status}`);
     }
 
-    const config = this.getConfig();
+    const config = await this.getConfig();
 
-    const tx = db.transaction(() => {
-      db.prepare("UPDATE players SET status = 'AUCTIONING' WHERE id = ?").run(playerId);
-      db.prepare(`
-        UPDATE auction_state
-        SET status = 'PLAYER_REVEAL',
-            current_player_id = ?,
-            current_highest_bid = 0,
-            current_highest_team_id = NULL,
-            timer_remaining = ?,
-            timer_paused = 0
-        WHERE id = 1
-      `).run(playerId, config.auction_timer_seconds);
+    await db.transaction(async (tx) => {
+      await tx.execute("UPDATE players SET status = 'AUCTIONING' WHERE id = ?", [playerId]);
+      await tx.execute(
+        `UPDATE auction_state
+         SET status = 'PLAYER_REVEAL',
+             current_player_id = ?,
+             current_highest_bid = 0,
+             current_highest_team_id = NULL,
+             timer_remaining = ?,
+             timer_paused = 0
+         WHERE id = 1`,
+        [playerId, config.auction_timer_seconds]
+      );
     });
-    tx();
 
-    this.logAudit('PLAYER_REVEALED', actor, playerId, null, {
+    await this.logAudit('PLAYER_REVEALED', actor, playerId, null, {
       name: player.name,
       base_price: player.base_price,
       gender: player.gender,
       position: player.position,
     });
 
-    this.broadcastState();
+    await this.broadcastState();
   }
 
-  public startBidding(actor: string) {
-    const state = this.getState();
+  public async startBidding(actor: string): Promise<void> {
+    const state = await this.getState();
     if (!state.current_player_id) throw new Error('No player selected.');
 
-    const config = this.getConfig();
-    db.prepare(`
-      UPDATE auction_state
-      SET status = 'BIDDING',
-          timer_remaining = ?,
-          timer_paused = 0
-      WHERE id = 1
-    `).run(config.auction_timer_seconds);
+    const config = await this.getConfig();
+    await db.execute(
+      `UPDATE auction_state
+       SET status = 'BIDDING',
+           timer_remaining = ?,
+           timer_paused = 0
+       WHERE id = 1`,
+      [config.auction_timer_seconds]
+    );
 
-    this.logAudit('BIDDING_STARTED', actor, state.current_player_id, null, {
+    await this.logAudit('BIDDING_STARTED', actor, state.current_player_id, null, {
       timer: config.auction_timer_seconds,
     });
 
     this.startTimerCountdown();
-    this.broadcastState();
+    await this.broadcastState();
   }
 
   /**
-   * Concurrency-safe atomic bid placement using FIFO lock queue and SQLite immediate transaction.
+   * Concurrency-safe atomic bid placement using:
+   * 1. In-process FIFO queue (bidQueue) for sequential processing on this node instance.
+   * 2. Transactional row-level locking (SELECT ... FOR UPDATE) on PostgreSQL auction_state and teams.
    */
   public async placeBid(
     teamId: string,
@@ -183,7 +196,7 @@ export class AuctionEngine {
     return new Promise((resolve) => {
       this.bidQueue = this.bidQueue
         .then(async () => {
-          const result = this.executeBidTransaction(teamId, amount, actor);
+          const result = await this.executeBidTransaction(teamId, amount, actor);
           resolve(result);
         })
         .catch((err) => {
@@ -192,262 +205,325 @@ export class AuctionEngine {
     });
   }
 
-  private executeBidTransaction(
+  private async executeBidTransaction(
     teamId: string,
     amount: number,
     actor: string
-  ): { accepted: boolean; reason?: string } {
-    const state = this.getState();
-    const config = this.getConfig();
+  ): Promise<{ accepted: boolean; reason?: string }> {
+    return await db.transaction(async (tx) => {
+      // 1. Exclusive row lock on auction_state to serialize concurrent attempts
+      const state = await tx.queryOne<AuctionStateRecord>(
+        'SELECT * FROM auction_state WHERE id = 1 FOR UPDATE'
+      );
+      if (!state) {
+        return { accepted: false, reason: 'Auction state not found.' };
+      }
 
-    const team = db.prepare('SELECT * FROM teams WHERE id = ?').get(teamId) as Team | undefined;
-    if (!team) return { accepted: false, reason: 'Team not found.' };
+      const config = this.parseConfig(state.config_json);
 
-    const player = state.current_player_id
-      ? (db.prepare('SELECT * FROM players WHERE id = ?').get(state.current_player_id) as Player)
-      : null;
+      // 2. Validate current phase
+      if (state.status !== 'BIDDING') {
+        return { accepted: false, reason: `Bidding is closed. Current auction status is ${state.status}.` };
+      }
 
-    const retainedPlayer = (db
-      .prepare("SELECT * FROM players WHERE sold_team_id = ? AND status = 'RETAINED'")
-      .get(teamId) as Player) || null;
+      if (!state.current_player_id) {
+        return { accepted: false, reason: 'No player is currently on the auction block.' };
+      }
 
-    const purchasedPlayers = db
-      .prepare("SELECT * FROM players WHERE sold_team_id = ? AND status = 'SOLD'")
-      .all(teamId) as Player[];
+      // 3. Exclusive row lock on the bidding team
+      const team = await tx.queryOne<Team>(
+        'SELECT * FROM teams WHERE id = ? FOR UPDATE',
+        [teamId]
+      );
+      if (!team) {
+        return { accepted: false, reason: 'Team not found.' };
+      }
 
-    // Validate using core rules engine
-    const validation = validateBidAttempt({
-      team,
-      retainedPlayer,
-      purchasedPlayers,
-      currentPlayer: player,
-      auctionStatus: state.status,
-      currentHighestBid: state.current_highest_bid,
-      currentHighestTeamId: state.current_highest_team_id,
-      attemptedBid: amount,
-      config,
-    });
+      // 4. Retrieve current player
+      const player = await tx.queryOne<Player>(
+        'SELECT * FROM players WHERE id = ?',
+        [state.current_player_id]
+      );
 
-    const bidId = `bid_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
-    const previousHighest = state.current_highest_bid;
+      // 5. Retrieve team's retained player and already purchased players
+      const retainedPlayer = await tx.queryOne<Player>(
+        "SELECT * FROM players WHERE sold_team_id = ? AND status = 'RETAINED'",
+        [teamId]
+      );
+      const purchasedPlayers = await tx.query<Player>(
+        "SELECT * FROM players WHERE sold_team_id = ? AND status = 'SOLD'",
+        [teamId]
+      );
 
-    if (!validation.accepted) {
-      // Record rejected bid in audit history
-      db.prepare(`
-        INSERT INTO bids (id, player_id, team_id, amount, previous_highest_bid, status, rejection_reason)
-        VALUES (?, ?, ?, ?, ?, 'REJECTED', ?)
-      `).run(bidId, state.current_player_id || '', teamId, amount, previousHighest, validation.reason);
+      // 6. Authoritative business rules validation
+      const validation = validateBidAttempt({
+        team,
+        retainedPlayer,
+        purchasedPlayers,
+        currentPlayer: player,
+        auctionStatus: state.status,
+        currentHighestBid: state.current_highest_bid,
+        currentHighestTeamId: state.current_highest_team_id,
+        attemptedBid: amount,
+        config,
+      });
 
-      this.logAudit('BID_REJECTED', actor, state.current_player_id, teamId, {
+      const bidId = `bid_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+      const previousHighest = state.current_highest_bid;
+
+      if (!validation.accepted) {
+        // Record rejected bid in bids table for audit
+        await tx.execute(
+          `INSERT INTO bids (id, player_id, team_id, amount, previous_highest_bid, status, rejection_reason)
+           VALUES (?, ?, ?, ?, ?, 'REJECTED', ?)`,
+          [bidId, state.current_player_id, teamId, amount, previousHighest, validation.reason]
+        );
+
+        await this.logAudit('BID_REJECTED', actor, state.current_player_id, teamId, {
+          amount,
+          previousHighest,
+          reason: validation.reason,
+        });
+
+        return validation;
+      }
+
+      // ACCEPTED BID: Execute atomic update
+      await tx.execute(
+        `INSERT INTO bids (id, player_id, team_id, amount, previous_highest_bid, status, rejection_reason)
+         VALUES (?, ?, ?, ?, ?, 'ACCEPTED', NULL)`,
+        [bidId, state.current_player_id, teamId, amount, previousHighest]
+      );
+
+      await tx.execute(
+        `UPDATE auction_state
+         SET current_highest_bid = ?,
+             current_highest_team_id = ?,
+             timer_remaining = ?
+         WHERE id = 1`,
+        [amount, teamId, config.auction_timer_seconds]
+      );
+
+      await this.logAudit('BID_ACCEPTED', actor, state.current_player_id, teamId, {
         amount,
         previousHighest,
-        reason: validation.reason,
+        newHighestBidder: team.name,
       });
 
-      return validation;
-    }
+      // Reset countdown timer
+      this.startTimerCountdown();
+      await this.broadcastState();
 
-    // ACCEPTED BID: Execute atomic update
-    const tx = db.transaction(() => {
-      // 1. Record accepted bid
-      db.prepare(`
-        INSERT INTO bids (id, player_id, team_id, amount, previous_highest_bid, status, rejection_reason)
-        VALUES (?, ?, ?, ?, ?, 'ACCEPTED', NULL)
-      `).run(bidId, state.current_player_id!, teamId, amount, previousHighest);
-
-      // 2. Update auction state & reset timer to 10 seconds
-      db.prepare(`
-        UPDATE auction_state
-        SET current_highest_bid = ?,
-            current_highest_team_id = ?,
-            timer_remaining = ?
-        WHERE id = 1
-      `).run(amount, teamId, config.auction_timer_seconds);
+      return { accepted: true };
     });
-    tx();
-
-    this.logAudit('BID_ACCEPTED', actor, state.current_player_id, teamId, {
-      amount,
-      previousHighest,
-      newHighestBidder: team.name,
-    });
-
-    // Reset countdown timer
-    this.startTimerCountdown();
-    this.broadcastState();
-
-    return { accepted: true };
   }
 
-  public confirmSold(actor: string) {
+  public async confirmSold(actor: string): Promise<void> {
     this.stopTimer();
-    const state = this.getState();
-    if (!state.current_player_id || !state.current_highest_team_id || state.current_highest_bid <= 0) {
-      throw new Error('No winning bid to confirm.');
-    }
 
-    const playerId = state.current_player_id;
-    const teamId = state.current_highest_team_id;
-    const winningBid = state.current_highest_bid;
+    await db.transaction(async (tx) => {
+      const state = await tx.queryOne<AuctionStateRecord>(
+        'SELECT * FROM auction_state WHERE id = 1 FOR UPDATE'
+      );
+      if (!state || !state.current_player_id || !state.current_highest_team_id || state.current_highest_bid <= 0) {
+        throw new Error('No winning bid to confirm.');
+      }
 
-    const player = db.prepare('SELECT * FROM players WHERE id = ?').get(playerId) as Player;
-    const team = db.prepare('SELECT * FROM teams WHERE id = ?').get(teamId) as Team;
+      const playerId = state.current_player_id;
+      const teamId = state.current_highest_team_id;
+      const winningBid = state.current_highest_bid;
 
-    const tx = db.transaction(() => {
+      const player = await tx.queryOne<Player>('SELECT * FROM players WHERE id = ? FOR UPDATE', [playerId]);
+      const team = await tx.queryOne<Team>('SELECT * FROM teams WHERE id = ? FOR UPDATE', [teamId]);
+      if (!player || !team) throw new Error('Player or team not found.');
+
+      if (team.credits_remaining < winningBid) {
+        throw new Error(`Team ${team.name} has insufficient credits (${team.credits_remaining}) for winning bid ${winningBid}.`);
+      }
+
       // 1. Update player status
-      db.prepare(`
-        UPDATE players
-        SET status = 'SOLD',
-            sold_team_id = ?,
-            sold_price = ?
-        WHERE id = ?
-      `).run(teamId, winningBid, playerId);
+      await tx.execute(
+        `UPDATE players SET status = 'SOLD', sold_team_id = ?, sold_price = ? WHERE id = ?`,
+        [teamId, winningBid, playerId]
+      );
 
       // 2. Deduct credits from winning team
-      db.prepare(`
-        UPDATE teams
-        SET credits_remaining = credits_remaining - ?
-        WHERE id = ?
-      `).run(winningBid, teamId);
+      await tx.execute(
+        `UPDATE teams SET credits_remaining = credits_remaining - ? WHERE id = ?`,
+        [winningBid, teamId]
+      );
 
-      // 3. Update auction state
-      db.prepare(`
-        UPDATE auction_state
-        SET status = 'SOLD',
-            last_sold_player_id = ?,
-            last_sold_team_id = ?,
-            last_sold_price = ?
-        WHERE id = 1
-      `).run(playerId, teamId, winningBid);
-    });
-    tx();
+      // 3. Record in sales table
+      const saleId = `sale_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+      await tx.execute(
+        `INSERT INTO sales (id, player_id, team_id, price, status, confirmed_by)
+         VALUES (?, ?, ?, ?, 'CONFIRMED', ?)`,
+        [saleId, playerId, teamId, winningBid, actor]
+      );
 
-    this.logAudit('SALE_CONFIRMED', actor, playerId, teamId, {
-      playerName: player.name,
-      teamName: team.name,
-      price: winningBid,
-    });
+      // 4. Update auction state
+      await tx.execute(
+        `UPDATE auction_state
+         SET status = 'SOLD',
+             last_sold_player_id = ?,
+             last_sold_team_id = ?,
+             last_sold_price = ?
+         WHERE id = 1`,
+        [playerId, teamId, winningBid]
+      );
 
-    if (this.io) {
-      this.io.emit('auction:sold', {
-        player,
-        winningTeam: { id: team.id, name: team.name },
-        soldPrice: winningBid,
+      await this.logAudit('SALE_CONFIRMED', actor, playerId, teamId, {
+        playerName: player.name,
+        teamName: team.name,
+        price: winningBid,
       });
-    }
 
-    this.broadcastState();
+      if (this.io) {
+        this.io.emit('auction:sold', {
+          player,
+          winningTeam: { id: team.id, name: team.name },
+          soldPrice: winningBid,
+        });
+      }
+    });
+
+    await this.broadcastState();
   }
 
-  public markUnsold(actor: string) {
+  public async markUnsold(actor: string): Promise<void> {
     this.stopTimer();
-    const state = this.getState();
-    if (!state.current_player_id) throw new Error('No player on auction.');
+    let unsoldPlayer: Player | null = null;
 
-    const playerId = state.current_player_id;
-    const player = db.prepare('SELECT * FROM players WHERE id = ?').get(playerId) as Player;
+    await db.transaction(async (tx) => {
+      const state = await tx.queryOne<AuctionStateRecord>(
+        'SELECT * FROM auction_state WHERE id = 1 FOR UPDATE'
+      );
+      if (!state || !state.current_player_id) throw new Error('No player on auction.');
 
-    const tx = db.transaction(() => {
-      db.prepare("UPDATE players SET status = 'UNSOLD', sold_team_id = NULL, sold_price = NULL WHERE id = ?").run(playerId);
-      db.prepare(`
-        UPDATE auction_state
-        SET status = 'UNSOLD',
-            current_highest_bid = 0,
-            current_highest_team_id = NULL
-        WHERE id = 1
-      `).run();
+      const playerId = state.current_player_id;
+      unsoldPlayer = await tx.queryOne<Player>('SELECT * FROM players WHERE id = ? FOR UPDATE', [playerId]);
+
+      await tx.execute(
+        "UPDATE players SET status = 'UNSOLD', sold_team_id = NULL, sold_price = NULL WHERE id = ?",
+        [playerId]
+      );
+
+      await tx.execute(
+        `UPDATE auction_state
+         SET status = 'UNSOLD',
+             current_highest_bid = 0,
+             current_highest_team_id = NULL
+         WHERE id = 1`
+      );
+
+      await this.logAudit('PLAYER_UNSOLD', actor, playerId, null, {
+        playerName: unsoldPlayer ? unsoldPlayer.name : playerId,
+      });
     });
-    tx();
 
-    this.logAudit('PLAYER_UNSOLD', actor, playerId, null, {
-      playerName: player.name,
-    });
-
-    if (this.io) {
-      this.io.emit('auction:unsold', { player });
+    if (this.io && unsoldPlayer) {
+      this.io.emit('auction:unsold', { player: unsoldPlayer });
     }
 
-    this.broadcastState();
+    await this.broadcastState();
   }
 
-  public undoLastSale(actor: string) {
-    const state = this.getState();
-    if (!state.last_sold_player_id || !state.last_sold_team_id || !state.last_sold_price) {
-      throw new Error('No recent sale available to undo.');
-    }
+  public async undoLastSale(actor: string): Promise<void> {
+    await db.transaction(async (tx) => {
+      const state = await tx.queryOne<AuctionStateRecord>(
+        'SELECT * FROM auction_state WHERE id = 1 FOR UPDATE'
+      );
+      if (!state || !state.last_sold_player_id || !state.last_sold_team_id || !state.last_sold_price) {
+        throw new Error('No recent sale available to undo.');
+      }
 
-    // Only allow undo if next player has not started bidding
-    if (state.status === 'BIDDING') {
-      throw new Error('Cannot undo sale while another player is currently in active bidding.');
-    }
+      // Only allow undo if next player has not started bidding
+      if (state.status === 'BIDDING') {
+        throw new Error('Cannot undo sale while another player is currently in active bidding.');
+      }
 
-    const playerId = state.last_sold_player_id;
-    const teamId = state.last_sold_team_id;
-    const price = state.last_sold_price;
+      const playerId = state.last_sold_player_id;
+      const teamId = state.last_sold_team_id;
+      const price = state.last_sold_price;
 
-    const player = db.prepare('SELECT * FROM players WHERE id = ?').get(playerId) as Player;
-    const team = db.prepare('SELECT * FROM teams WHERE id = ?').get(teamId) as Team;
+      const player = await tx.queryOne<Player>('SELECT * FROM players WHERE id = ? FOR UPDATE', [playerId]);
+      const team = await tx.queryOne<Team>('SELECT * FROM teams WHERE id = ? FOR UPDATE', [teamId]);
 
-    const tx = db.transaction(() => {
       // 1. Reset player to AVAILABLE
-      db.prepare("UPDATE players SET status = 'AVAILABLE', sold_team_id = NULL, sold_price = NULL WHERE id = ?").run(playerId);
+      await tx.execute(
+        "UPDATE players SET status = 'AVAILABLE', sold_team_id = NULL, sold_price = NULL WHERE id = ?",
+        [playerId]
+      );
 
       // 2. Refund team credits
-      db.prepare('UPDATE teams SET credits_remaining = credits_remaining + ? WHERE id = ?').run(price, teamId);
+      await tx.execute(
+        'UPDATE teams SET credits_remaining = credits_remaining + ? WHERE id = ?',
+        [price, teamId]
+      );
 
-      // 3. Clear last sold from state
-      db.prepare(`
-        UPDATE auction_state
-        SET last_sold_player_id = NULL,
-            last_sold_team_id = NULL,
-            last_sold_price = NULL
-        WHERE id = 1
-      `).run();
+      // 3. Mark sales record as UNDONE
+      await tx.execute(
+        `UPDATE sales SET status = 'UNDONE', undone_at = CURRENT_TIMESTAMP, undone_by = ?
+         WHERE player_id = ? AND team_id = ? AND status = 'CONFIRMED'`,
+        [actor, playerId, teamId]
+      );
+
+      // 4. Clear last sold from state
+      await tx.execute(
+        `UPDATE auction_state
+         SET last_sold_player_id = NULL,
+             last_sold_team_id = NULL,
+             last_sold_price = NULL
+         WHERE id = 1`
+      );
+
+      await this.logAudit('SALE_UNDONE', actor, playerId, teamId, {
+        playerName: player ? player.name : playerId,
+        teamName: team ? team.name : teamId,
+        refundedPrice: price,
+      });
     });
-    tx();
 
-    this.logAudit('SALE_UNDONE', actor, playerId, teamId, {
-      playerName: player ? player.name : playerId,
-      teamName: team ? team.name : teamId,
-      refundedPrice: price,
-    });
-
-    this.broadcastState();
+    await this.broadcastState();
   }
 
   private startTimerCountdown() {
     this.stopTimer();
 
-    this.timerInterval = setInterval(() => {
-      const state = this.getState();
-      if (state.status !== 'BIDDING' || state.timer_paused === 1) {
-        this.stopTimer();
-        return;
-      }
-
-      const nextRemaining = state.timer_remaining - 1;
-
-      if (nextRemaining <= 0) {
-        this.stopTimer();
-        db.prepare('UPDATE auction_state SET timer_remaining = 0 WHERE id = 1').run();
-        this.broadcastTimer(0);
-
-        if (state.current_highest_bid > 0 && state.current_highest_team_id) {
-          // Timer reached 0 with a winning bidder -> SOLD_PENDING_CONFIRMATION
-          db.prepare("UPDATE auction_state SET status = 'SOLD_PENDING_CONFIRMATION' WHERE id = 1").run();
-          this.logAudit('TIMER_EXPIRED', 'system', state.current_player_id, state.current_highest_team_id, {
-            highestBid: state.current_highest_bid,
-          });
-        } else {
-          // 0 bids placed -> auto-transition to UNSOLD
-          this.markUnsold('system');
+    this.timerInterval = setInterval(async () => {
+      try {
+        const state = await this.getState();
+        if (state.status !== 'BIDDING' || state.timer_paused === 1) {
+          this.stopTimer();
           return;
         }
 
-        this.broadcastState();
-      } else {
-        db.prepare('UPDATE auction_state SET timer_remaining = ? WHERE id = 1').run(nextRemaining);
-        this.broadcastTimer(nextRemaining);
+        const nextRemaining = state.timer_remaining - 1;
+
+        if (nextRemaining <= 0) {
+          this.stopTimer();
+          await db.execute('UPDATE auction_state SET timer_remaining = 0 WHERE id = 1');
+          this.broadcastTimer(0);
+
+          if (state.current_highest_bid > 0 && state.current_highest_team_id) {
+            // Timer reached 0 with a winning bidder -> SOLD_PENDING_CONFIRMATION
+            await db.execute("UPDATE auction_state SET status = 'SOLD_PENDING_CONFIRMATION' WHERE id = 1");
+            await this.logAudit('TIMER_EXPIRED', 'system', state.current_player_id, state.current_highest_team_id, {
+              highestBid: state.current_highest_bid,
+            });
+          } else {
+            // 0 bids placed -> auto-transition to UNSOLD
+            await this.markUnsold('system');
+            return;
+          }
+
+          await this.broadcastState();
+        } else {
+          await db.execute('UPDATE auction_state SET timer_remaining = ? WHERE id = 1', [nextRemaining]);
+          this.broadcastTimer(nextRemaining);
+        }
+      } catch (err) {
+        console.error('Error during timer tick:', err);
       }
     }, 1000);
   }
@@ -465,148 +541,175 @@ export class AuctionEngine {
     }
   }
 
-  public broadcastState() {
+  public async broadcastState(): Promise<void> {
     if (!this.io) return;
 
-    const state = this.getState();
-    const config = this.getConfig();
-    const currentPlayer = state.current_player_id
-      ? (db.prepare('SELECT * FROM players WHERE id = ?').get(state.current_player_id) as Player)
-      : null;
+    try {
+      const state = await this.getState();
+      const config = await this.getConfig();
+      const currentPlayer = state.current_player_id
+        ? await db.queryOne<Player>('SELECT * FROM players WHERE id = ?', [state.current_player_id])
+        : null;
 
-    // 1. PUBLIC DISPLAY PAYLOAD (Strictly no team budgets, no current bidder name)
-    const publicPayload = {
-      status: state.status,
-      currentPlayer: currentPlayer
-        ? {
-            id: currentPlayer.id,
-            name: currentPlayer.name,
-            gender: currentPlayer.gender,
-            position: currentPlayer.position,
-            base_price: currentPlayer.base_price,
-            department: currentPlayer.department,
-            year: currentPlayer.year,
-            skill_rating: currentPlayer.skill_rating,
-          }
-        : null,
-      currentHighestBid: state.current_highest_bid,
-      timerRemaining: state.timer_remaining,
-      timerPaused: state.timer_paused === 1,
-      // Revealed only when officially SOLD
-      lastSold: state.last_sold_player_id
-        ? {
-            player: db.prepare('SELECT * FROM players WHERE id = ?').get(state.last_sold_player_id),
-            team: db.prepare('SELECT * FROM teams WHERE id = ?').get(state.last_sold_team_id),
-            price: state.last_sold_price,
-          }
-        : null,
-    };
-    this.io.to('display').emit('auction:state_sync', publicPayload);
+      // 1. PUBLIC DISPLAY PAYLOAD (Strictly no team budgets, no current bidder identity)
+      let lastSoldPlayer: Player | null = null;
+      let lastSoldTeam: Team | null = null;
+      if (state.last_sold_player_id && state.last_sold_team_id) {
+        lastSoldPlayer = await db.queryOne<Player>('SELECT * FROM players WHERE id = ?', [state.last_sold_player_id]);
+        lastSoldTeam = await db.queryOne<Team>('SELECT * FROM teams WHERE id = ?', [state.last_sold_team_id]);
+      }
 
-    // 2. ADMIN PAYLOAD (Full visibility, all team summaries, full bid logs)
-    const allTeams = db.prepare('SELECT * FROM teams').all() as Team[];
-    const teamSummaries: TeamSquadSummary[] = allTeams.map((team) => {
-      const retained = (db
-        .prepare("SELECT * FROM players WHERE sold_team_id = ? AND status = 'RETAINED'")
-        .get(team.id) as Player) || null;
-      const purchased = db
-        .prepare("SELECT * FROM players WHERE sold_team_id = ? AND status = 'SOLD'")
-        .all(team.id) as Player[];
-      return calculateSquadSummary(
-        team,
-        retained,
-        purchased,
-        config,
-        currentPlayer,
-        state.current_highest_team_id
-      );
-    });
-
-    const recentBids = state.current_player_id
-      ? (db.prepare(`
-          SELECT b.*, t.name as team_name, t.captain_name
-          FROM bids b
-          JOIN teams t ON b.team_id = t.id
-          WHERE b.player_id = ?
-          ORDER BY b.timestamp DESC
-          LIMIT 20
-        `).all(state.current_player_id) as Bid[])
-      : [];
-
-    const adminPayload = {
-      ...publicPayload,
-      currentHighestTeamId: state.current_highest_team_id,
-      currentHighestTeamName: state.current_highest_team_id
-        ? (db.prepare('SELECT name FROM teams WHERE id = ?').get(state.current_highest_team_id) as any)?.name
-        : null,
-      teamSummaries,
-      recentBids,
-      config,
-      canUndo: !!state.last_sold_player_id && state.status !== 'BIDDING',
-    };
-    this.io.to('admin').emit('auction:state_sync', adminPayload);
-
-    // 3. CAPTAIN PAYLOADS (Private room per team: captain_<teamId>)
-    for (const team of allTeams) {
-      const retained = (db
-        .prepare("SELECT * FROM players WHERE sold_team_id = ? AND status = 'RETAINED'")
-        .get(team.id) as Player) || null;
-      const purchased = db
-        .prepare("SELECT * FROM players WHERE sold_team_id = ? AND status = 'SOLD'")
-        .all(team.id) as Player[];
-      const summary = calculateSquadSummary(
-        team,
-        retained,
-        purchased,
-        config,
-        currentPlayer,
-        state.current_highest_team_id
-      );
-
-      // Find captain's highest bid on this player
-      const captainHighestBid = state.current_player_id
-        ? ((db.prepare(`
-            SELECT MAX(amount) as max_bid
-            FROM bids
-            WHERE player_id = ? AND team_id = ? AND status = 'ACCEPTED'
-          `).get(state.current_player_id, team.id) as any)?.max_bid || 0)
-        : 0;
-
-      const isCurrentHighest = state.current_highest_team_id === team.id;
-
-      const captainPayload = {
+      const publicPayload = {
         status: state.status,
-        currentPlayer: publicPayload.currentPlayer,
+        currentPlayer: currentPlayer
+          ? {
+              id: currentPlayer.id,
+              name: currentPlayer.name,
+              gender: currentPlayer.gender,
+              position: currentPlayer.position,
+              base_price: currentPlayer.base_price,
+              department: currentPlayer.department,
+              year: currentPlayer.year,
+              skill_rating: currentPlayer.skill_rating,
+            }
+          : null,
         currentHighestBid: state.current_highest_bid,
         timerRemaining: state.timer_remaining,
         timerPaused: state.timer_paused === 1,
-        // Captain private team stats
-        yourSquadSummary: summary,
-        yourHighestBid: captainHighestBid,
-        isYourBidHighest: isCurrentHighest,
-        maxLegalBid: summary.max_legal_bid_on_current_player,
-        canBid: summary.can_bid_on_current_player && state.status === 'BIDDING',
-        minNextBid: state.current_highest_bid === 0
-          ? (currentPlayer?.base_price || config.min_bid)
-          : state.current_highest_bid + config.min_bid_increment,
+        lastSold: lastSoldPlayer && lastSoldTeam
+          ? {
+              player: lastSoldPlayer,
+              team: { id: lastSoldTeam.id, name: lastSoldTeam.name },
+              price: state.last_sold_price,
+            }
+          : null,
       };
+      this.io.to('display').emit('auction:state_sync', publicPayload);
 
-      this.io.to(`captain_${team.id}`).emit('auction:state_sync', captainPayload);
+      // 2. ADMIN PAYLOAD (Full visibility, all team summaries, full bid logs)
+      const allTeams = await db.query<Team>('SELECT * FROM teams');
+      const teamSummaries: TeamSquadSummary[] = [];
+
+      for (const team of allTeams) {
+        const retained = await db.queryOne<Player>(
+          "SELECT * FROM players WHERE sold_team_id = ? AND status = 'RETAINED'",
+          [team.id]
+        );
+        const purchased = await db.query<Player>(
+          "SELECT * FROM players WHERE sold_team_id = ? AND status = 'SOLD'",
+          [team.id]
+        );
+        teamSummaries.push(
+          calculateSquadSummary(
+            team,
+            retained,
+            purchased,
+            config,
+            currentPlayer,
+            state.current_highest_team_id
+          )
+        );
+      }
+
+      let recentBids: Bid[] = [];
+      if (state.current_player_id) {
+        recentBids = await db.query<Bid>(
+          `SELECT b.*, t.name as team_name, t.captain_name
+           FROM bids b
+           JOIN teams t ON b.team_id = t.id
+           WHERE b.player_id = ?
+           ORDER BY b.timestamp DESC
+           LIMIT 20`,
+          [state.current_player_id]
+        );
+      }
+
+      let currentHighestTeamName: string | null = null;
+      if (state.current_highest_team_id) {
+        const hTeam = await db.queryOne<Team>('SELECT name FROM teams WHERE id = ?', [state.current_highest_team_id]);
+        currentHighestTeamName = hTeam ? hTeam.name : null;
+      }
+
+      const adminPayload = {
+        ...publicPayload,
+        currentHighestTeamId: state.current_highest_team_id,
+        currentHighestTeamName,
+        teamSummaries,
+        recentBids,
+        config,
+        canUndo: !!state.last_sold_player_id && state.status !== 'BIDDING',
+      };
+      this.io.to('admin').emit('auction:state_sync', adminPayload);
+
+      // 3. CAPTAIN PAYLOADS (Private room per team: captain_<teamId>)
+      for (const team of allTeams) {
+        const retained = await db.queryOne<Player>(
+          "SELECT * FROM players WHERE sold_team_id = ? AND status = 'RETAINED'",
+          [team.id]
+        );
+        const purchased = await db.query<Player>(
+          "SELECT * FROM players WHERE sold_team_id = ? AND status = 'SOLD'",
+          [team.id]
+        );
+        const summary = calculateSquadSummary(
+          team,
+          retained,
+          purchased,
+          config,
+          currentPlayer,
+          state.current_highest_team_id
+        );
+
+        let captainHighestBid = 0;
+        if (state.current_player_id) {
+          const maxRow = await db.queryOne<{ max_bid: number }>(
+            `SELECT MAX(amount) as max_bid
+             FROM bids
+             WHERE player_id = ? AND team_id = ? AND status = 'ACCEPTED'`,
+            [state.current_player_id, team.id]
+          );
+          captainHighestBid = maxRow?.max_bid || 0;
+        }
+
+        const isCurrentHighest = state.current_highest_team_id === team.id;
+
+        const captainPayload = {
+          status: state.status,
+          currentPlayer: publicPayload.currentPlayer,
+          currentHighestBid: state.current_highest_bid,
+          timerRemaining: state.timer_remaining,
+          timerPaused: state.timer_paused === 1,
+          yourSquadSummary: summary,
+          yourHighestBid: captainHighestBid,
+          isYourBidHighest: isCurrentHighest,
+          maxLegalBid: summary.max_legal_bid_on_current_player,
+          canBid: summary.can_bid_on_current_player && state.status === 'BIDDING',
+          minNextBid: state.current_highest_bid === 0
+            ? (currentPlayer?.base_price || config.min_bid)
+            : state.current_highest_bid + config.min_bid_increment,
+        };
+
+        this.io.to(`captain_${team.id}`).emit('auction:state_sync', captainPayload);
+      }
+    } catch (err) {
+      console.error('Error during broadcastState:', err);
     }
   }
 
-  public logAudit(
+  public async logAudit(
     eventType: string,
     actor: string,
     playerId: string | null,
     teamId: string | null,
     details: any
-  ) {
+  ): Promise<void> {
     const id = `audit_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
-    db.prepare(`
-      INSERT INTO audit_logs (id, event_type, actor, player_id, team_id, details_json)
-      VALUES (?, ?, ?, ?, ?, ?)
-    `).run(id, eventType, actor, playerId, teamId, JSON.stringify(details));
+    const detailsJson = typeof details === 'string' ? details : JSON.stringify(details);
+    await db.execute(
+      `INSERT INTO audit_logs (id, event_type, actor, player_id, team_id, details_json)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [id, eventType, actor, playerId, teamId, detailsJson]
+    );
   }
 }
 

@@ -11,7 +11,8 @@
     "seed:prod": "tsx src/scripts/initAccounts.ts",
     "accounts:init": "tsx src/scripts/initAccounts.ts",
     "reset:password": "tsx src/scripts/resetPassword.ts",
-    "db:backup": "tsx src/scripts/backup.ts"
+    "db:backup": "tsx src/scripts/backup.ts",
+    "db:migrate": "tsx src/scripts/migrateSqliteToPg.ts"
   },
   "dependencies": {
     "bcryptjs": "^3.0.2",
@@ -20,6 +21,7 @@
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
     "jsonwebtoken": "^9.0.2",
+    "pg": "^8.23.1",
     "socket.io": "^4.8.1"
   },
   "devDependencies": {
@@ -29,7 +31,9 @@
     "@types/express": "^4.17.21",
     "@types/jsonwebtoken": "^9.0.8",
     "@types/node": "^22.10.7",
+    "@types/pg": "^8.23.1",
     "@types/supertest": "^7.2.1",
+    "pg-mem": "^3.0.14",
     "supertest": "^7.3.0",
     "tsx": "^4.19.2",
     "typescript": "^5.7.3",

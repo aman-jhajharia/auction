@@ -2,6 +2,7 @@ import React, { createContext, useContext, useEffect, useState } from 'react';
 import { io, Socket } from 'socket.io-client';
 import { useAuth } from './AuthContext.js';
 import { sounds } from '../utils/soundEffects.js';
+import { getSocketUrl } from '../utils/api.js';
 import confetti from 'canvas-confetti';
 
 interface SocketContextType {
@@ -37,7 +38,7 @@ export const SocketProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       return;
     }
 
-    const s = io(window.location.origin, {
+    const s = io(getSocketUrl(), {
       auth: { token },
       transports: ['websocket', 'polling'],
     });

@@ -2,12 +2,16 @@ import { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
 import { UserRole } from './types.js';
 
-const DEFAULT_SECRET = 'muqabla_dev_secret_key_change_in_production_2026';
-const JWT_SECRET = process.env.JWT_SECRET || DEFAULT_SECRET;
+const isProduction = process.env.NODE_ENV === 'production';
+const JWT_SECRET = process.env.JWT_SECRET;
+const DEV_SECRET = 'muqabla_dev_secret_key_change_in_production_2026';
 
-if (process.env.NODE_ENV === 'production' && JWT_SECRET === DEFAULT_SECRET) {
-  console.warn('⚠️  WARNING: Running in production with default JWT_SECRET! Please set JWT_SECRET in your .env file immediately.');
+// Strict security enforcement in production: refuse to boot with missing or insecure secret
+if (isProduction && (!JWT_SECRET || JWT_SECRET === DEV_SECRET || JWT_SECRET.trim().length < 16)) {
+  throw new Error('FATAL: A secure, high-entropy JWT_SECRET (minimum 16 characters) must be configured in environment variables for production.');
 }
+
+const EFFECTIVE_JWT_SECRET = JWT_SECRET || DEV_SECRET;
 
 export interface JwtPayload {
   userId: string;
@@ -18,12 +22,12 @@ export interface JwtPayload {
 
 export function generateToken(payload: JwtPayload): string {
   const expiresIn = (process.env.JWT_EXPIRES_IN || '24h') as any;
-  return jwt.sign(payload, JWT_SECRET, { expiresIn });
+  return jwt.sign(payload, EFFECTIVE_JWT_SECRET, { expiresIn });
 }
 
 export function verifyToken(token: string): JwtPayload | null {
   try {
-    return jwt.verify(token, JWT_SECRET) as JwtPayload;
+    return jwt.verify(token, EFFECTIVE_JWT_SECRET) as JwtPayload;
   } catch {
     return null;
   }

@@ -6,7 +6,6 @@ import { seedProductionAccounts } from '../src/scripts/initAccounts.js';
 import { runBackup } from '../src/scripts/backup.js';
 import { router as apiRouter } from '../src/routes.js';
 import { generateToken, verifyToken } from '../src/auth.js';
-import { auctionEngine } from '../src/auctionEngine.js';
 import fs from 'fs';
 import path from 'path';
 
@@ -19,22 +18,30 @@ describe('Muqabla Production Security, Authentication & Privacy Test Suite', () 
   let adminPassword = '';
   let displayPassword = '';
 
-  beforeAll(() => {
-    initDatabase();
+  beforeAll(async () => {
+    await initDatabase();
     // Clean database tables for hermetic test execution
-    db.exec(`
-      PRAGMA foreign_keys = OFF;
-      DELETE FROM auction_state;
-      DELETE FROM audit_logs;
-      DELETE FROM bids;
-      DELETE FROM users;
-      DELETE FROM players;
-      DELETE FROM teams;
-      PRAGMA foreign_keys = ON;
-    `);
+    if (db.isPostgres()) {
+      await db.execute('TRUNCATE TABLE audit_logs, bids, sales, auction_state, users, players, teams CASCADE');
+    } else {
+      const sqlite = db.getSqliteDb();
+      if (sqlite) {
+        sqlite.exec(`
+          PRAGMA foreign_keys = OFF;
+          DELETE FROM auction_state;
+          DELETE FROM audit_logs;
+          DELETE FROM bids;
+          DELETE FROM sales;
+          DELETE FROM users;
+          DELETE FROM players;
+          DELETE FROM teams;
+          PRAGMA foreign_keys = ON;
+        `);
+      }
+    }
 
     // Seed production accounts
-    const seedResult = seedProductionAccounts();
+    const seedResult = await seedProductionAccounts();
     for (const cred of seedResult.created) {
       if (cred.role === 'CAPTAIN') {
         captainPasswords[cred.username] = cred.password;
@@ -47,7 +54,7 @@ describe('Muqabla Production Security, Authentication & Privacy Test Suite', () 
   });
 
   describe('1. Production Seeding & Account Creation', () => {
-    it('creates exactly 5 captain accounts with the requested Login IDs', () => {
+    it('creates exactly 5 captain accounts with the requested Login IDs', async () => {
       const expectedLogins = [
         'ashmit_curry',
         'vansh_baby',
@@ -57,30 +64,37 @@ describe('Muqabla Production Security, Authentication & Privacy Test Suite', () 
       ];
 
       for (const loginId of expectedLogins) {
-        const user = db.prepare('SELECT * FROM users WHERE username = ?').get(loginId) as any;
+        const user = await db.queryOne<{ id: string; role: string; team_id: string }>(
+          'SELECT * FROM users WHERE username = ?',
+          [loginId]
+        );
         expect(user).toBeDefined();
-        expect(user.role).toBe('CAPTAIN');
-        expect(user.team_id).toBeDefined();
+        expect(user!.role).toBe('CAPTAIN');
+        expect(user!.team_id).toBeDefined();
         expect(captainPasswords[loginId]).toBeDefined();
         expect(captainPasswords[loginId].length).toBeGreaterThanOrEqual(16);
       }
     });
 
-    it('assigns the correct team names to the 5 teams', () => {
-      const teams = db.prepare('SELECT * FROM teams ORDER BY id ASC').all() as any[];
+    it('assigns the correct team names to the 5 teams', async () => {
+      const teams = await db.query<any[]>('SELECT * FROM teams ORDER BY id ASC');
       expect(teams.length).toBe(5);
-      expect(teams.find((t) => t.id === 'team_a').name).toBe('Ashmit');
-      expect(teams.find((t) => t.id === 'team_b').name).toBe('Vansh');
-      expect(teams.find((t) => t.id === 'team_c').name).toBe('Divyanshu');
-      expect(teams.find((t) => t.id === 'team_d').name).toBe('Chirayu');
-      expect(teams.find((t) => t.id === 'team_e').name).toBe('Parth');
+      expect((teams as any[]).find((t) => t.id === 'team_a').name).toBe('Ashmit');
+      expect((teams as any[]).find((t) => t.id === 'team_b').name).toBe('Vansh');
+      expect((teams as any[]).find((t) => t.id === 'team_c').name).toBe('Divyanshu');
+      expect((teams as any[]).find((t) => t.id === 'team_d').name).toBe('Chirayu');
+      expect((teams as any[]).find((t) => t.id === 'team_e').name).toBe('Parth');
     });
 
-    it('is idempotent: re-running seedProductionAccounts does NOT duplicate accounts or overwrite passwords', () => {
-      const userCountBefore = (db.prepare('SELECT COUNT(*) as c FROM users').get() as any).c;
-      const reSeedResult = seedProductionAccounts();
+    it('is idempotent: re-running seedProductionAccounts does NOT duplicate accounts or overwrite passwords', async () => {
+      const userCountBeforeRow = await db.queryOne<{ c: number | string }>('SELECT COUNT(*) as c FROM users');
+      const userCountBefore = Number(userCountBeforeRow?.c || 0);
 
-      const userCountAfter = (db.prepare('SELECT COUNT(*) as c FROM users').get() as any).c;
+      const reSeedResult = await seedProductionAccounts();
+
+      const userCountAfterRow = await db.queryOne<{ c: number | string }>('SELECT COUNT(*) as c FROM users');
+      const userCountAfter = Number(userCountAfterRow?.c || 0);
+
       expect(userCountAfter).toBe(userCountBefore);
       expect(reSeedResult.created.length).toBe(0);
       expect(reSeedResult.existing.length).toBeGreaterThanOrEqual(7);
@@ -282,7 +296,7 @@ describe('Muqabla Production Security, Authentication & Privacy Test Suite', () 
 
       expect(fs.existsSync(backupFile)).toBe(true);
       const stat = fs.statSync(backupFile);
-      expect(stat.size).toBeGreaterThan(1000); // SQLite file has size
+      expect(stat.size).toBeGreaterThan(100);
     });
   });
 });

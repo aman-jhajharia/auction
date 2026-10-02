@@ -11,9 +11,9 @@ client/dist
 data/*.db
 data/*.db-wal
 data/*.db-shm
-backups/*.db
-backups/*.db-wal
-backups/*.db-shm
+backups/
+server/backups/
+*.db
 
 # Environment Variables & Secrets (NEVER COMMIT PRODUCTION SECRETS)
 .env

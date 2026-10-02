@@ -11,8 +11,6 @@ export interface GeneratedCredential {
 }
 
 export function generateSecurePassword(length = 16): string {
-  // Use crypto random bytes with a diverse, url-safe high-entropy alphabet
-  // Ensures no ambiguous characters and easy copy-pasting for captains
   const charset = 'abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789!@#$%^*';
   const bytes = crypto.randomBytes(length);
   let result = '';
@@ -22,15 +20,14 @@ export function generateSecurePassword(length = 16): string {
   return result;
 }
 
-export function seedProductionAccounts(): {
+export async function seedProductionAccounts(): Promise<{
   created: GeneratedCredential[];
   existing: string[];
-} {
-  initDatabase();
+}> {
+  await initDatabase();
 
   const created: GeneratedCredential[] = [];
   const existing: string[] = [];
-
   const saltRounds = 12;
 
   // 1. Exactly 5 Teams with requested team and captain names
@@ -42,30 +39,29 @@ export function seedProductionAccounts(): {
     { id: 'team_e', name: 'Parth', captain_name: 'Parth', gender: 'Male', loginId: 'parth_gangsta' },
   ];
 
-  // Upsert teams (safe to re-run, preserves credits_remaining if already modified)
-  const upsertTeam = db.prepare(`
-    INSERT INTO teams (id, name, captain_name, captain_gender, starting_credits, credits_remaining)
-    VALUES (?, ?, ?, ?, 100, 100)
-    ON CONFLICT(id) DO UPDATE SET
-      name = excluded.name,
-      captain_name = excluded.captain_name,
-      captain_gender = excluded.captain_gender
-  `);
-
   for (const t of teams) {
-    upsertTeam.run(t.id, t.name, t.captain_name, t.gender);
+    await db.execute(
+      `INSERT INTO teams (id, name, captain_name, captain_gender, starting_credits, credits_remaining)
+       VALUES (?, ?, ?, ?, 100, 100)
+       ON CONFLICT(id) DO UPDATE SET
+         name = EXCLUDED.name,
+         captain_name = EXCLUDED.captain_name,
+         captain_gender = EXCLUDED.captain_gender`,
+      [t.id, t.name, t.captain_name, t.gender]
+    );
   }
 
   // 2. Admin account
   const adminUsername = process.env.ADMIN_USERNAME || 'admin';
-  const existingAdmin = db.prepare('SELECT id FROM users WHERE username = ?').get(adminUsername);
+  const existingAdmin = await db.queryOne('SELECT id FROM users WHERE username = ?', [adminUsername]);
   if (!existingAdmin) {
     const adminPassword = process.env.ADMIN_PASSWORD || generateSecurePassword(18);
     const hash = bcrypt.hashSync(adminPassword, saltRounds);
-    db.prepare(`
-      INSERT INTO users (id, username, password_hash, role, team_id)
-      VALUES (?, ?, ?, 'ADMIN', NULL)
-    `).run('u_admin', adminUsername, hash);
+    await db.execute(
+      `INSERT INTO users (id, username, password_hash, role, team_id)
+       VALUES (?, ?, ?, 'ADMIN', NULL)`,
+      ['u_admin', adminUsername, hash]
+    );
 
     created.push({
       role: 'ADMIN',
@@ -79,14 +75,15 @@ export function seedProductionAccounts(): {
 
   // 3. Public Display account
   const displayUsername = process.env.DISPLAY_USERNAME || 'display';
-  const existingDisplay = db.prepare('SELECT id FROM users WHERE username = ?').get(displayUsername);
+  const existingDisplay = await db.queryOne('SELECT id FROM users WHERE username = ?', [displayUsername]);
   if (!existingDisplay) {
     const displayPassword = process.env.DISPLAY_PASSWORD || generateSecurePassword(18);
     const hash = bcrypt.hashSync(displayPassword, saltRounds);
-    db.prepare(`
-      INSERT INTO users (id, username, password_hash, role, team_id)
-      VALUES (?, ?, ?, 'DISPLAY', NULL)
-    `).run('u_display', displayUsername, hash);
+    await db.execute(
+      `INSERT INTO users (id, username, password_hash, role, team_id)
+       VALUES (?, ?, ?, 'DISPLAY', NULL)`,
+      ['u_display', displayUsername, hash]
+    );
 
     created.push({
       role: 'DISPLAY',
@@ -100,17 +97,17 @@ export function seedProductionAccounts(): {
 
   // 4. Exactly 5 Captain accounts
   for (const t of teams) {
-    const existingUser = db.prepare('SELECT id FROM users WHERE username = ?').get(t.loginId);
+    const existingUser = await db.queryOne('SELECT id FROM users WHERE username = ?', [t.loginId]);
     if (!existingUser) {
-      // Check if env variable provided for this captain, otherwise generate secure random password
       const envKey = `CAPTAIN_${t.name.toUpperCase()}_PASSWORD`;
       const captainPassword = process.env[envKey] || generateSecurePassword(16);
       const hash = bcrypt.hashSync(captainPassword, saltRounds);
 
-      db.prepare(`
-        INSERT INTO users (id, username, password_hash, role, team_id)
-        VALUES (?, ?, ?, 'CAPTAIN', ?)
-      `).run(`u_cap_${t.id}`, t.loginId, hash, t.id);
+      await db.execute(
+        `INSERT INTO users (id, username, password_hash, role, team_id)
+         VALUES (?, ?, ?, 'CAPTAIN', ?)`,
+        [`u_cap_${t.id}`, t.loginId, hash, t.id]
+      );
 
       created.push({
         role: 'CAPTAIN',
@@ -124,7 +121,9 @@ export function seedProductionAccounts(): {
   }
 
   // 5. Ensure Retained Players exist (1 per team, 0 credits, marked RETAINED)
-  const existingRetainedCount = (db.prepare("SELECT COUNT(*) as c FROM players WHERE status = 'RETAINED'").get() as any).c;
+  const retainedRow = await db.queryOne<{ c: number | string }>("SELECT COUNT(*) as c FROM players WHERE status = 'RETAINED'");
+  const existingRetainedCount = Number(retainedRow?.c || 0);
+
   if (existingRetainedCount === 0) {
     const retained = [
       { id: 'p_ret_a', name: 'Rahul Sharma', gender: 'Male', position: 'Point Guard', teamId: 'team_a', dept: 'CSE', yr: '4th Year' },
@@ -134,19 +133,20 @@ export function seedProductionAccounts(): {
       { id: 'p_ret_e', name: 'Ritu Sen', gender: 'Female', position: 'Small Forward', teamId: 'team_e', dept: 'Management', yr: '2nd Year' },
     ];
 
-    const insertRetained = db.prepare(`
-      INSERT INTO players (id, name, gender, position, base_price, status, sold_team_id, sold_price, queue_order, department, year, skill_rating, notes)
-      VALUES (?, ?, ?, ?, 0, 'RETAINED', ?, 0, 0, ?, ?, 4.8, 'RETAINED — FREE')
-      ON CONFLICT(id) DO UPDATE SET sold_team_id = excluded.sold_team_id
-    `);
-
     for (const r of retained) {
-      insertRetained.run(r.id, r.name, r.gender, r.position, r.teamId, r.dept, r.yr);
+      await db.execute(
+        `INSERT INTO players (id, name, gender, position, base_price, status, sold_team_id, sold_price, queue_order, department, year, skill_rating, notes)
+         VALUES (?, ?, ?, ?, 0, 'RETAINED', ?, 0, 0, ?, ?, 4.8, 'RETAINED — FREE')
+         ON CONFLICT(id) DO UPDATE SET sold_team_id = EXCLUDED.sold_team_id`,
+        [r.id, r.name, r.gender, r.position, r.teamId, r.dept, r.yr]
+      );
     }
   }
 
   // 6. Ensure Auction Pool exists if empty
-  const existingPoolCount = (db.prepare("SELECT COUNT(*) as c FROM players WHERE status = 'AVAILABLE'").get() as any).c;
+  const poolRow = await db.queryOne<{ c: number | string }>("SELECT COUNT(*) as c FROM players WHERE status = 'AVAILABLE'");
+  const existingPoolCount = Number(poolRow?.c || 0);
+
   if (existingPoolCount === 0) {
     const pool = [
       { name: 'Kavya Krishnan', gender: 'Female', position: 'Point Guard', base_price: 5, dept: 'CSE', year: '3rd Year', skill: 4.7 },
@@ -193,36 +193,37 @@ export function seedProductionAccounts(): {
       { name: 'Jhanvi Kapoor', gender: 'Female', position: 'Shooting Guard', base_price: 3, dept: 'Management', year: '1st Year', skill: 4.1 },
     ];
 
-    const insertPlayer = db.prepare(`
-      INSERT INTO players (id, name, gender, position, base_price, status, sold_team_id, sold_price, queue_order, department, year, skill_rating, notes)
-      VALUES (?, ?, ?, ?, ?, 'AVAILABLE', NULL, NULL, ?, ?, ?, ?, ?)
-    `);
-
     let order = 1;
     for (const p of pool) {
-      insertPlayer.run(
-        `p_pool_${order}`,
-        p.name,
-        p.gender,
-        p.position,
-        p.base_price,
-        order,
-        p.dept,
-        p.year,
-        p.skill,
-        `University player (${p.dept}, ${p.year})`
+      await db.execute(
+        `INSERT INTO players (id, name, gender, position, base_price, status, sold_team_id, sold_price, queue_order, department, year, skill_rating, notes)
+         VALUES (?, ?, ?, ?, ?, 'AVAILABLE', NULL, NULL, ?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO NOTHING`,
+        [
+          `p_pool_${order}`,
+          p.name,
+          p.gender,
+          p.position,
+          p.base_price,
+          order,
+          p.dept,
+          p.year,
+          p.skill,
+          `University player (${p.dept}, ${p.year})`,
+        ]
       );
       order++;
     }
   }
 
   // 7. Ensure initial auction state
-  const stateExists = db.prepare('SELECT id FROM auction_state WHERE id = 1').get();
+  const stateExists = await db.queryOne('SELECT id FROM auction_state WHERE id = 1');
   if (!stateExists) {
-    db.prepare(`
-      INSERT INTO auction_state (id, status, current_player_id, current_highest_bid, current_highest_team_id, timer_remaining, timer_paused, config_json)
-      VALUES (1, 'SETUP', NULL, 0, NULL, 10, 0, ?)
-    `).run(JSON.stringify(DEFAULT_CONFIG));
+    await db.execute(
+      `INSERT INTO auction_state (id, status, current_player_id, current_highest_bid, current_highest_team_id, timer_remaining, timer_paused, config_json)
+       VALUES (1, 'SETUP', NULL, 0, NULL, 10, 0, ?)`,
+      [JSON.stringify(DEFAULT_CONFIG)]
+    );
   }
 
   return { created, existing };
@@ -230,31 +231,37 @@ export function seedProductionAccounts(): {
 
 // CLI Execution Entry Point
 if (process.argv[1] && process.argv[1].endsWith('initAccounts.ts')) {
-  const result = seedProductionAccounts();
+  seedProductionAccounts()
+    .then((result) => {
+      console.log('\n========================================================================================');
+      console.log('🏀 MUQABLA 2026 — PRODUCTION ACCOUNTS INITIALIZATION');
+      console.log('========================================================================================\n');
 
-  console.log('\n========================================================================================');
-  console.log('🏀 MUQABLA 2026 — PRODUCTION ACCOUNTS INITIALIZATION');
-  console.log('========================================================================================\n');
+      if (result.created.length > 0) {
+        console.log('⚠️  IMPORTANT: The following account(s) were just created with secure random initial passwords.');
+        console.log('⚠️  Copy and securely distribute them now. Passwords are saved ONLY as one-way hashes!\n');
 
-  if (result.created.length > 0) {
-    console.log('⚠️  IMPORTANT: The following account(s) were just created with secure random initial passwords.');
-    console.log('⚠️  Copy and securely distribute them now. Passwords are saved ONLY as one-way hashes!\n');
+        console.table(
+          result.created.map((c) => ({
+            Role: c.role,
+            Team: c.teamName,
+            'Login ID (Username)': c.username,
+            'Generated Initial Password': c.password,
+          }))
+        );
 
-    console.table(
-      result.created.map((c) => ({
-        Role: c.role,
-        Team: c.teamName,
-        'Login ID (Username)': c.username,
-        'Generated Initial Password': c.password,
-      }))
-    );
+        console.log('\n✅ Secure initialization complete.');
+      } else {
+        console.log('ℹ️  All 5 captain accounts and admin/display accounts already exist in the database.');
+        console.log(`ℹ️  Existing accounts: ${result.existing.join(', ')}`);
+        console.log('ℹ️  No passwords were overwritten. To reset a password, use npm run reset:password');
+      }
 
-    console.log('\n✅ Secure initialization complete.');
-  } else {
-    console.log('ℹ️  All 5 captain accounts and admin/display accounts already exist in the database.');
-    console.log(`ℹ️  Existing accounts: ${result.existing.join(', ')}`);
-    console.log('ℹ️  No passwords were overwritten. To reset a password, use npm run reset:password');
-  }
-
-  console.log('========================================================================================\n');
+      console.log('========================================================================================\n');
+      process.exit(0);
+    })
+    .catch((err) => {
+      console.error('❌ Failed to initialize production accounts:', err);
+      process.exit(1);
+    });
 }

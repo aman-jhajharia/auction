@@ -15,7 +15,8 @@
     "seed:prod": "npm run seed:prod --prefix server",
     "accounts:init": "npm run accounts:init --prefix server",
     "reset:password": "npm run reset:password --prefix server --",
-    "db:backup": "npm run db:backup --prefix server"
+    "db:backup": "npm run db:backup --prefix server",
+    "db:migrate": "npm run db:migrate --prefix server --"
   },
   "devDependencies": {
     "concurrently": "^9.1.2"

@@ -1,4 +1,5 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
+import { apiUrl } from '../utils/api.js';
 
 export type UserRole = 'ADMIN' | 'CAPTAIN' | 'DISPLAY';
 
@@ -38,7 +39,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         return;
       }
       try {
-        const res = await fetch('/api/auth/me', {
+        const res = await fetch(apiUrl('/api/auth/me'), {
           headers: { Authorization: `Bearer ${token}` },
         });
         if (res.ok) {
@@ -60,7 +61,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const login = async (username: string, password: string): Promise<boolean> => {
     try {
-      const res = await fetch('/api/auth/login', {
+      const res = await fetch(apiUrl('/api/auth/login'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ username, password }),
@@ -81,7 +82,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const logout = async () => {
     try {
       if (token) {
-        await fetch('/api/auth/logout', {
+        await fetch(apiUrl('/api/auth/logout'), {
           method: 'POST',
           headers: { Authorization: `Bearer ${token}` },
         }).catch(() => {});

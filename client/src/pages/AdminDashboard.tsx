@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useSocket } from '../context/SocketContext.js';
 import { useAuth } from '../context/AuthContext.js';
+import { apiUrl } from '../utils/api.js';
 import { TimerRing } from '../components/TimerRing.js';
 import {
   Play,
@@ -54,7 +55,7 @@ export const AdminDashboard: React.FC = () => {
   // Fetch full players list for admin
   const fetchPlayers = async () => {
     try {
-      const res = await fetch(`/api/players?status=${playersFilter}`, {
+      const res = await fetch(apiUrl(`/api/players?status=${playersFilter}`), {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (res.ok) {
@@ -69,7 +70,7 @@ export const AdminDashboard: React.FC = () => {
   // Fetch audit logs
   const fetchLogs = async () => {
     try {
-      const res = await fetch(`/api/logs?eventType=${logFilter}`, {
+      const res = await fetch(apiUrl(`/api/logs?eventType=${logFilter}`), {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (res.ok) {
@@ -89,7 +90,7 @@ export const AdminDashboard: React.FC = () => {
   const handleAddPlayer = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
-      const res = await fetch('/api/players', {
+      const res = await fetch(apiUrl('/api/players'), {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -110,7 +111,7 @@ export const AdminDashboard: React.FC = () => {
   const handleDeletePlayer = async (id: string) => {
     if (!confirm('Are you sure you want to remove this player from the auction?')) return;
     try {
-      await fetch(`/api/players/${id}`, {
+      await fetch(apiUrl(`/api/players/${id}`), {
         method: 'DELETE',
         headers: { Authorization: `Bearer ${token}` },
       });
@@ -674,7 +675,7 @@ export const AdminDashboard: React.FC = () => {
               </select>
 
               <a
-                href="/api/logs/export/csv"
+                href={apiUrl('/api/logs/export/csv')}
                 target="_blank"
                 rel="noreferrer"
                 className="btn btn-gold"
